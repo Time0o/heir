@@ -508,11 +508,19 @@ class TextualMlirEmitter:
         )
         return ""
       case ir.Expr(op="binop"):
-        emitted_expr, ext, ty = self.emit_binop(assign.value)
+        emitted_expr, lhs_ext, rhs_ext, ty = self.emit_binop(
+          assign.value, assign.target)
         expr = f"{emitted_expr} : {mlirType(ty)} {mlirLoc(assign.loc)}"
         # if the var is being reassigned, then create a new SSA var
         assign_str = self.reassign_and_forward_name(assign.target, expr)
-        return f"{ext}{assign_str}"
+        # Prepend extensions of arguments to target type bitwidth if necessary.
+        tmp = []
+        if lhs_ext is not None:
+          tmp.append(lhs_ext)
+        if rhs_ext is not None:
+          tmp.append(rhs_ext)
+        tmp.append(assign_str)
+        return "".join(tmp)
       case ir.Expr(op="call"):
         func = assign.value.func
         # if assert fails, variable was undefined
@@ -578,20 +586,23 @@ class TextualMlirEmitter:
         return ""
     raise InternalCompilerError(f"Unsupported IR Element: {assign}")
 
-  def emit_ext_if_needed(self, lhs, rhs):
+  def emit_ext_if_needed(self, lhs, rhs, target):
     lhs_type = self.typemap.get(str(lhs))
     rhs_type = self.typemap.get(str(rhs))
+    target_type = self.typemap.get(str(target))
 
     # Types agree: do nothing
-    if lhs_type == rhs_type:
-      return self.get_name(lhs), self.get_name(rhs), "", lhs_type
+    if lhs_type == rhs_type == target_type:
+      return self.get_name(lhs), self.get_name(rhs), None, None
 
     # types aren't integer types
-    if not isIntegerLike(lhs_type) or not isIntegerLike(rhs_type):
+    if not isIntegerLike(lhs_type) or \
+      not isIntegerLike(rhs_type) or \
+      not isIntegerLike(target_type):
       raise InternalCompilerError(
           "Extension handling for non-integer (e.g., floats, tensors) types"
           " is not yet supported. Please ensure (inferred) bit-widths match."
-          f" Failed to extend {lhs_type} and {rhs_type} types."
+          f" Failed to extend {lhs_type} and {rhs_type} types to {target_type} type."
       )
       # TODO (#1162): Support bitwidth extension for float types
       #      (this probably requires adding support for local variable type hints,
@@ -600,65 +611,76 @@ class TextualMlirEmitter:
 
     lhs_bitwidth = getBitwidth(lhs_type)
     rhs_bitwidth = getBitwidth(rhs_type)
+    target_bitwidth = getBitwidth(target_type)
 
-    if lhs_bitwidth == rhs_bitwidth:
-      return self.get_name(lhs), self.get_name(rhs), "", lhs_type
+    if lhs_bitwidth == rhs_bitwidth == target_bitwidth:
+      return self.get_name(lhs), self.get_name(rhs), None, None
 
-    # time to emit some extensions!
-    short, long = lhs, rhs
-    if lhs_bitwidth > rhs_bitwidth:
-      short, long = rhs, lhs
+    # If either the lhs or rhs argument's type has smaller bitwidth than the
+    # result's we insert an `arith.extui` operation so that MLIR does not
+    # complain.
+    def _extend(arg):
+        ext_target = self.get_next_name()
+        ext = (
+            f"{ext_target} = arith.extui {self.get_name(arg)} : "
+            f"{mlirType(self.typemap.get(str(arg)))} "
+            f"to {mlirType(target_type)} "
+            f"{mlirLoc(arg.loc)}\n"
+        )
+        return ext_target, ext
 
-    tmp = self.get_next_name()
-    ext = (
-        f"{tmp} = arith.extui {self.get_name(short)} : "
-        f"{mlirType(self.typemap.get(str(short)))} "
-        f"to {mlirType(self.typemap.get(str(long)))} "
-        f"{mlirLoc(short.loc)}\n"
-    )
+    if lhs_bitwidth < target_bitwidth:
+        lhs_ssa, lhs_ext = _extend(lhs)
+    else:
+        lhs_ssa, lhs_ext = self.get_name(lhs), None
 
-    if lhs_bitwidth > rhs_bitwidth:
-      return self.get_name(lhs), tmp, ext, lhs_type
-    return tmp, self.get_name(rhs), ext, rhs_type
+    if rhs_bitwidth < target_bitwidth:
+        rhs_ssa, rhs_ext = _extend(rhs)
+    else:
+        rhs_ssa, rhs_ext = self.get_name(lhs), None
 
-  def emit_binop(self, binop):
-    # This should be the same, otherwise MLIR will complain
-    suffix = arithSuffix(self.typemap.get(str(binop.lhs)))
+    return lhs_ssa, rhs_ssa, lhs_ext, rhs_ext
 
-    lhs_ssa, rhs_ssa, ext, ty = self.emit_ext_if_needed(binop.lhs, binop.rhs)
+  def emit_binop(self, binop, target):
+    ty = self.typemap.get(str(target))
+
+    suffix = arithSuffix(ty)
+
+    lhs_ssa, rhs_ssa, lhs_ext, rhs_ext = self.emit_ext_if_needed(
+      binop.lhs, binop.rhs, target)
 
     match binop.fn:
       case operator.lt:
-        return f"arith.cmp{suffix} slt, {lhs_ssa}, {rhs_ssa}", ext, ty
+        return f"arith.cmp{suffix} slt, {lhs_ssa}, {rhs_ssa}", lhs_ext, rhs_ext, ty
       case operator.ge:
-        return f"arith.cmp{suffix} sge, {lhs_ssa}, {rhs_ssa}", ext, ty
+        return f"arith.cmp{suffix} sge, {lhs_ssa}, {rhs_ssa}", lhs_ext, rhs_ext, ty
       case operator.eq:
-        return f"arith.cmp{suffix} eq, {lhs_ssa}, {rhs_ssa}", ext, ty
+        return f"arith.cmp{suffix} eq, {lhs_ssa}, {rhs_ssa}", lhs_ext, rhs_ext, ty
       case operator.ne:
-        return f"arith.cmp{suffix} ne, {lhs_ssa}, {rhs_ssa}", ext, ty
+        return f"arith.cmp{suffix} ne, {lhs_ssa}, {rhs_ssa}", lhs_ext, rhs_ext, ty
       case operator.add:
-        return f"arith.add{suffix} {lhs_ssa}, {rhs_ssa}", ext, ty
+        return f"arith.add{suffix} {lhs_ssa}, {rhs_ssa}", lhs_ext, rhs_ext, ty
       case operator.mul:
-        return f"arith.mul{suffix} {lhs_ssa}, {rhs_ssa}", ext, ty
+        return f"arith.mul{suffix} {lhs_ssa}, {rhs_ssa}", lhs_ext, rhs_ext, ty
       case operator.sub:
-        return f"arith.sub{suffix} {lhs_ssa}, {rhs_ssa}", ext, ty
+        return f"arith.sub{suffix} {lhs_ssa}, {rhs_ssa}", lhs_ext, rhs_ext, ty
       case operator.lshift:
-        return f"arith.shl{suffix} {lhs_ssa}, {rhs_ssa}", ext, ty
+        return f"arith.shl{suffix} {lhs_ssa}, {rhs_ssa}", lhs_ext, rhs_ext, ty
       case operator.rshift:
         # Used signed semantics when integer types
         suffix = "si" if suffix == "i" else suffix
-        return f"arith.shr{suffix} {lhs_ssa}, {rhs_ssa}", ext, ty
+        return f"arith.shr{suffix} {lhs_ssa}, {rhs_ssa}", lhs_ext, rhs_ext, ty
       case operator.and_:
-        return f"arith.and{suffix} {lhs_ssa}, {rhs_ssa}", ext, ty
+        return f"arith.and{suffix} {lhs_ssa}, {rhs_ssa}", lhs_ext, rhs_ext, ty
       case operator.xor:
-        return f"arith.xor{suffix} {lhs_ssa}, {rhs_ssa}", ext, ty
+        return f"arith.xor{suffix} {lhs_ssa}, {rhs_ssa}", lhs_ext, rhs_ext, ty
       case operator.floordiv:
         suffix = "si" if suffix == "i" else suffix
-        return f"arith.div{suffix} {lhs_ssa}, {rhs_ssa}", ext, ty
+        return f"arith.div{suffix} {lhs_ssa}, {rhs_ssa}", lhs_ext, rhs_ext, ty
       case operator.mod:
         # Used signed semantics when integer types
         suffix = "si" if suffix == "i" else suffix
-        return f"arith.rem{suffix} {lhs_ssa}, {rhs_ssa}", ext, ty
+        return f"arith.rem{suffix} {lhs_ssa}, {rhs_ssa}", lhs_ext, rhs_ext, ty
 
     raise InternalCompilerError("Unsupported binop: " + binop.fn.__name__)
 
