@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <random>
 #include <unordered_map>
 #include <utility>
@@ -44,13 +45,13 @@ namespace tensor_ext {
 #include "lib/Dialect/TensorExt/Transforms/Passes.h.inc"
 
 ShiftScheme VosVosErkinShiftNetworks::findShiftScheme(
-    const Mapping& mapping, ArrayRef<int64_t> shiftOrder) {
-  CacheKey cacheKey = makeCacheKey(mapping, shiftOrder);
-  if (schemeCache.count(cacheKey)) {
-    return schemeCache[cacheKey];
+    const Mapping& mapping, const ShiftStrategy &shiftStrategyUneval) {
+  auto it = schemeCache.find(shiftStrategyUneval);
+  if (it != schemeCache.end()) {
+    return it->second;
   }
 
-  ShiftStrategy strategy = evaluateShiftStrategy(mapping, shiftOrder);
+  const ShiftStrategy &shiftStrategy = evaluateShiftStrategy(mapping, shiftStrategyUneval);
 
   // Create a graph whose vertices are the input indices to remap, and
   // whose edges are conflicts: an edge being present means the two indices
@@ -59,7 +60,7 @@ ShiftScheme VosVosErkinShiftNetworks::findShiftScheme(
   for (const MappingEntry& entry : mapping) {
     conflictGraph.addVertex(entry.source);
   }
-  for (const auto& [roundNum, round] : llvm::enumerate(strategy.getRounds())) {
+  for (const auto& [roundNum, round] : llvm::enumerate(shiftStrategy.getRounds())) {
     if (roundNum == 0) continue;
 
     auto posns = round.positions;
@@ -119,60 +120,58 @@ ShiftScheme VosVosErkinShiftNetworks::findShiftScheme(
     }
   });
 
-  ShiftScheme scheme{resultRotationGroups, strategy};
-  schemeCache[cacheKey] = scheme;
-  return schemeCache[cacheKey];
+  ShiftScheme shiftScheme{resultRotationGroups, shiftStrategy};
+  return schemeCache.insert({shiftStrategy, shiftScheme}).first->second;
+}
+
+ShiftScheme VosVosErkinShiftNetworks::findShiftScheme(const Mapping& mapping, ShiftKind shiftKind) {
+   ShiftStrategy shiftStrategy(mapping.getCiphertextSize(),
+                               mapping.getNumCiphertexts(), shiftKind);
+   return findShiftScheme(mapping, std::move(shiftStrategy));
 }
 
 ShiftScheme VosVosErkinShiftNetworks::findBestShiftScheme(
-    const Mapping& mapping, std::size_t randomSeed, unsigned randomTries) {
-  SmallVector<int64_t> initShiftOrder = defaultShiftOrder(
-      mapping.getCiphertextSize() * mapping.getNumCiphertexts());
+    const Mapping& mapping, ShiftKind shiftKind, std::size_t randomSeed, unsigned randomTries) {
+
+  assert(randomTries > 0 && "at least one shift strategy must be tried");
+
+  ShiftStrategy shiftStrategy(
+    mapping.getCiphertextSize(), mapping.getNumCiphertexts(), shiftKind);
 
   std::size_t numRoundsMin = std::numeric_limits<std::size_t>::max();
-  SmallVector<int64_t> bestShiftOrder;
+  std::optional<ShiftStrategy> bestShiftStrategy;
 
   std::seed_seq seq{randomSeed};
   std::mt19937 g(seq);
 
   for (unsigned i = 0; i < randomTries; ++i) {
-    // In order to get a uniform distribution over all permutations using a
-    // Fisher-Yates shuffle we have to apply it to the original vector in each
-    // iteration.
-    SmallVector<int64_t> shiftOrder = initShiftOrder;
+    shiftStrategy.shuffleShiftOrder(g);
 
-    std::ranges::shuffle(shiftOrder.begin(), shiftOrder.end(), g);
+    const ShiftStrategy &shiftStrategyEval = evaluateShiftStrategy(mapping, shiftStrategy);
 
-    ShiftStrategy strategy = evaluateShiftStrategy(mapping, shiftOrder);
-
-    std::size_t numRounds = strategy.getRounds().size();
+    std::size_t numRounds = shiftStrategyEval.getRounds().size();
     if (numRounds < numRoundsMin) {
       numRoundsMin = numRounds;
-      bestShiftOrder = shiftOrder;
+      bestShiftStrategy = shiftStrategyEval;
     }
   }
 
-  return findShiftScheme(mapping, bestShiftOrder);
+  assert(bestShiftStrategy && "best shift strategy found");
+
+  return findShiftScheme(mapping, *bestShiftStrategy);
 }
 
-ShiftStrategy VosVosErkinShiftNetworks::evaluateShiftStrategy(
-    const Mapping& mapping, ArrayRef<int64_t> shiftOrder) {
-  CacheKey cacheKey = makeCacheKey(mapping, shiftOrder);
-  if (strategyCache.count(cacheKey)) {
-    return strategyCache[cacheKey];
+const ShiftStrategy &VosVosErkinShiftNetworks::evaluateShiftStrategy(
+    const Mapping& mapping, ShiftStrategy shiftStrategy) {
+
+  auto it = strategyCache.find(shiftStrategy);
+  if (it != strategyCache.end()) {
+    return *it;
   }
 
-  ShiftStrategy strategy(mapping.getCiphertextSize(),
-                         mapping.getNumCiphertexts(), shiftOrder);
-  strategy.evaluate(mapping);
-  strategyCache[cacheKey] = strategy;
-  return strategy;
-}
+  shiftStrategy.evaluate(mapping);
 
-VosVosErkinShiftNetworks::CacheKey VosVosErkinShiftNetworks::makeCacheKey(
-    const Mapping& mapping, ArrayRef<int64_t> shiftOrder) {
-  FrozenVector<int64_t> frozenShiftOrder(shiftOrder);
-  return std::make_pair(mapping, frozenShiftOrder);
+  return *strategyCache.insert(shiftStrategy).first;
 }
 
 void populateMappingFromLayoutAttr(const LayoutAttr& layoutAttr,

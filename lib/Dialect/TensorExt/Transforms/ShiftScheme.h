@@ -1,12 +1,14 @@
 #ifndef LIB_DIALECT_TENSOREXT_TRANSFORMS_SHIFTSCHEME_H_
 #define LIB_DIALECT_TENSOREXT_TRANSFORMS_SHIFTSCHEME_H_
 
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <utility>
 
+#include "lib/Utils/ADT/FrozenVector.h"
 #include "lib/Utils/MathUtils.h"
 #include "llvm/include/llvm/ADT/Hashing.h"   // from @llvm-project
 #include "mlir/include/mlir/Support/LLVM.h"  // from @llvm-project
@@ -81,6 +83,14 @@ class Mapping {
 // A group of source CtSlots to rotate together
 using RotationGroup = DenseSet<CtSlot>;
 
+/// Defines shift direction, currently all-left and all-right shifts are
+/// supported.
+enum class ShiftKind {
+  LEFT,
+  RIGHT,
+  DEFAULT = LEFT
+};
+
 // A set of ciphertexts is represented as a single large virtual ciphertext
 // (flattened row-major), and so a given (ct, slot) pair is "shifted" by an
 // amount that may exceed the size of a single ciphertext. The algorithm keeps
@@ -112,25 +122,33 @@ struct ShiftRound {
   int64_t rotationAmount;
 };
 
-/// Return the default shift order: LSB to MSB, i.e. 1, 2, 4, 8, ...
-SmallVector<int64_t> defaultShiftOrder(int64_t n);
-
 class ShiftStrategy {
- public:
-  ShiftStrategy() : ShiftStrategy(1, 1) {}
+ friend DenseMapInfo<mlir::heir::tensor_ext::ShiftStrategy>;
 
+ public:
   ShiftStrategy(int64_t ciphertextSize, int64_t numCiphertexts = 1,
-                ArrayRef<int64_t> shiftOrder = {})
+                ShiftKind shiftKind = ShiftKind::DEFAULT)
       : ciphertextSize(ciphertextSize),
         virtualCiphertextSize(numCiphertexts * ciphertextSize),
-        shiftOrder(shiftOrder.empty()
-                       ? defaultShiftOrder(numCiphertexts * ciphertextSize)
-                       : shiftOrder) {
+        shiftOrder(defaultShiftOrder(numCiphertexts * ciphertextSize, shiftKind)),
+        shiftKind(shiftKind) {
     assert(isPowerOfTwo(ciphertextSize) &&
            "ciphertext size must be a power of two");
   }
 
-  // Return the
+  /// Return the default shift order: LSB to MSB, i.e. 1, 2, 4, 8, ... or
+  /// -1, -2, -4, -8, ... if shifting right.
+  static SmallVector<int64_t> defaultShiftOrder(
+    int64_t n, ShiftKind shiftKind = ShiftKind::DEFAULT);
+
+  const SmallVector<int64_t> &getShiftOrder() const { return shiftOrder; }
+
+  // Randomly shuffle shift order.
+  template<typename RNG>
+  void shuffleShiftOrder(RNG &g) {
+    std::ranges::shuffle(shiftOrder.begin(), shiftOrder.end(), g);
+  }
+
   int64_t getVirtualShift(const CtSlot& source, const CtSlot& target) const;
 
   SmallVector<ShiftRound> getRounds() const { return rounds; }
@@ -139,9 +157,14 @@ class ShiftStrategy {
   void evaluate(const Mapping& mapping);
 
  private:
+  ShiftStrategy() : ciphertextSize(0), virtualCiphertextSize(0) {}
+
   int64_t ciphertextSize;
   int64_t virtualCiphertextSize;
+
   SmallVector<int64_t> shiftOrder;
+  ShiftKind shiftKind = ShiftKind::DEFAULT;
+
   SmallVector<ShiftRound> rounds;
 };
 
@@ -149,7 +172,6 @@ struct ShiftScheme {
   SmallVector<RotationGroup> rotationGroups;
   ShiftStrategy strategy;
 
-  ShiftScheme() = default;
   ShiftScheme(SmallVector<RotationGroup> rotationGroups, ShiftStrategy strategy)
       : rotationGroups(std::move(rotationGroups)),
         strategy(std::move(strategy)) {}
@@ -194,6 +216,30 @@ struct DenseMapInfo<mlir::heir::tensor_ext::SourceShift> {
   static bool isEqual(const mlir::heir::tensor_ext::SourceShift& L,
                       const mlir::heir::tensor_ext::SourceShift& R) {
     return L == R;
+  }
+};
+
+template <>
+struct DenseMapInfo<mlir::heir::tensor_ext::ShiftStrategy> {
+  static mlir::heir::tensor_ext::ShiftStrategy getEmptyKey() {
+    mlir::heir::tensor_ext::ShiftStrategy shiftStrategy;
+    shiftStrategy.ciphertextSize = -1;
+    shiftStrategy.virtualCiphertextSize = -1;
+    return shiftStrategy;
+  }
+  static mlir::heir::tensor_ext::ShiftStrategy getTombstoneKey() {
+    mlir::heir::tensor_ext::ShiftStrategy shiftStrategy;
+    shiftStrategy.ciphertextSize = -1;
+    shiftStrategy.virtualCiphertextSize = -2;
+    return shiftStrategy;
+  }
+  static unsigned getHashValue(const mlir::heir::tensor_ext::ShiftStrategy& Val) {
+    mlir::heir::FrozenVector<int64_t> frozenShiftOrder(Val.getShiftOrder());
+    return DenseMapInfo<decltype(frozenShiftOrder)>::getHashValue(frozenShiftOrder);
+  }
+  static bool isEqual(const mlir::heir::tensor_ext::ShiftStrategy& L,
+                      const mlir::heir::tensor_ext::ShiftStrategy& R) {
+    return L.getShiftOrder() == R.getShiftOrder();
   }
 };
 

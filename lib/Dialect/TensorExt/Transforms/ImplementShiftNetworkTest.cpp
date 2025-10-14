@@ -87,43 +87,49 @@ std::vector<std::vector<int>> manuallyApplyMapping(
   }
 }
 
-::testing::AssertionResult checkMapping(const Mapping& mapping,
-                                        int64_t numCiphertexts,
-                                        int64_t ciphertextSize,
-                                        unsigned naiveNumRGExpected = 0) {
-  VosVosErkinShiftNetworks shiftNetworks;
+// We parametrize tests over the kind of shifts (i.e. left, right, ...) from
+// which the shift scheme is constructed.
+class ImplementShiftNetworkTest : public ::testing::TestWithParam<ShiftKind> {
+ protected:
+  ::testing::AssertionResult checkMapping(const Mapping& mapping,
+                                          int64_t numCiphertexts,
+                                          int64_t ciphertextSize,
+                                          unsigned naiveNumRGExpected = 0) {
+    ShiftKind shiftKind = GetParam();
 
-  auto naiveScheme = shiftNetworks.findShiftScheme(mapping);
-  unsigned naiveNumRG = naiveScheme.rotationGroups.size();
-  unsigned naiveNumRounds = naiveScheme.strategy.getRounds().size();
-  if (naiveNumRGExpected > 0 && naiveNumRG != naiveNumRGExpected)
-    return ::testing::AssertionFailure()
-           << "Expected " << naiveNumRGExpected << " rotation groups but got "
-           << naiveNumRG;
-  auto naiveResult = simulateShiftNetwork(mapping, naiveScheme, numCiphertexts,
-                                          ciphertextSize);
-  if (!naiveResult) return naiveResult;
+    VosVosErkinShiftNetworks shiftNetworks;
 
-  // We try a large number of shift orders here such that we can be effectively
-  // certain that we will find a network that is at least as good as the "naive"
-  // one.
-  auto bestScheme = shiftNetworks.findBestShiftScheme(
-      mapping, /*randomSeed=*/42, /*randomTries=*/1000);
-  unsigned bestNumRG = bestScheme.rotationGroups.size();
-  unsigned bestNumRounds = bestScheme.strategy.getRounds().size();
-  if (bestNumRounds > naiveNumRounds)
-    return ::testing::AssertionFailure()
-           << "Expected best found network with " << bestNumRounds
-           << " rounds to not be worse then naive network which has "
-           << naiveNumRounds;
-  auto bestResult =
-      simulateShiftNetwork(mapping, bestScheme, numCiphertexts, ciphertextSize);
-  if (!bestResult) return bestResult;
+    auto naiveScheme = shiftNetworks.findShiftScheme(mapping, shiftKind);
+    unsigned naiveNumRG = naiveScheme.rotationGroups.size();
+    unsigned naiveNumRounds = naiveScheme.strategy.getRounds().size();
+    if (naiveNumRGExpected > 0 && naiveNumRG != naiveNumRGExpected)
+      return ::testing::AssertionFailure()
+             << "Expected " << naiveNumRGExpected << " rotation groups but got "
+             << naiveNumRG;
+    auto naiveResult = simulateShiftNetwork(mapping, naiveScheme,
+                                            numCiphertexts, ciphertextSize);
+    if (!naiveResult) return naiveResult;
 
-  return ::testing::AssertionSuccess();
-}
+    // We try a large number of shift orders here such that we can be
+    // effectively certain that we will find a network that is at least as good
+    // as the "naive" one.
+    auto bestScheme = shiftNetworks.findBestShiftScheme(
+        mapping, shiftKind, /*randomSeed=*/42, /*randomTries=*/1000);
+    unsigned bestNumRounds = bestScheme.strategy.getRounds().size();
+    if (bestNumRounds > naiveNumRounds)
+      return ::testing::AssertionFailure()
+             << "Expected best found network with " << bestNumRounds
+             << " rounds to not be worse then naive network which has "
+             << naiveNumRounds;
+    auto bestResult = simulateShiftNetwork(mapping, bestScheme, numCiphertexts,
+                                           ciphertextSize);
+    if (!bestResult) return bestResult;
 
-TEST(ImplementShiftNetworkTest, TestTrivial) {
+    return ::testing::AssertionSuccess();
+  }
+};
+
+TEST_P(ImplementShiftNetworkTest, TestTrivial) {
   int64_t numCts = 1;
   int64_t ctSize = 8;
   Mapping mapping(ctSize, numCts);
@@ -131,7 +137,7 @@ TEST(ImplementShiftNetworkTest, TestTrivial) {
   EXPECT_TRUE(checkMapping(mapping, numCts, ctSize));
 }
 
-TEST(ImplementShiftNetworkTest, TestFig3) {
+TEST_P(ImplementShiftNetworkTest, TestFig3) {
   int64_t numCts = 1;
   int64_t ctSize = 16;
   Mapping mapping(ctSize, numCts);
@@ -154,7 +160,7 @@ TEST(ImplementShiftNetworkTest, TestFig3) {
   EXPECT_TRUE(checkMapping(mapping, numCts, ctSize));
 }
 
-TEST(ImplementShiftNetworkTest, TestFullReplication) {
+TEST_P(ImplementShiftNetworkTest, TestFullReplication) {
   int64_t numCts = 1;
   int64_t ctSize = 16;
   Mapping mapping(ctSize, numCts);
@@ -177,7 +183,7 @@ TEST(ImplementShiftNetworkTest, TestFullReplication) {
   EXPECT_TRUE(checkMapping(mapping, numCts, ctSize));
 }
 
-TEST(ImplementShiftNetworkTest, TestTwoReplication) {
+TEST_P(ImplementShiftNetworkTest, TestTwoReplication) {
   int64_t numCts = 1;
   int64_t ctSize = 16;
   Mapping mapping(ctSize, numCts);
@@ -200,7 +206,7 @@ TEST(ImplementShiftNetworkTest, TestTwoReplication) {
   EXPECT_TRUE(checkMapping(mapping, numCts, ctSize));
 }
 
-TEST(ImplementShiftNetworkTest, TestTwoReplicationAlternateShiftOrder) {
+TEST_P(ImplementShiftNetworkTest, TestTwoReplicationAlternateShiftOrder) {
   int64_t numCts = 1;
   int64_t ctSize = 16;
   Mapping mapping(ctSize, numCts);
@@ -223,7 +229,7 @@ TEST(ImplementShiftNetworkTest, TestTwoReplicationAlternateShiftOrder) {
   EXPECT_TRUE(checkMapping(mapping, numCts, ctSize));
 }
 
-TEST(ImplementShiftNetworkTest, TestSwapTwoCiphertexts) {
+TEST_P(ImplementShiftNetworkTest, TestSwapTwoCiphertexts) {
   int64_t numCts = 2;
   int64_t ctSize = 4;
   Mapping mapping(ctSize, numCts);
@@ -239,7 +245,7 @@ TEST(ImplementShiftNetworkTest, TestSwapTwoCiphertexts) {
   EXPECT_TRUE(checkMapping(mapping, numCts, ctSize));
 }
 
-TEST(ImplementShiftNetworkTest, TestReorderThreeCiphertexts) {
+TEST_P(ImplementShiftNetworkTest, TestReorderThreeCiphertexts) {
   int64_t numCts = 3;
   int64_t ctSize = 4;
   Mapping mapping(ctSize, numCts);
@@ -258,7 +264,7 @@ TEST(ImplementShiftNetworkTest, TestReorderThreeCiphertexts) {
   EXPECT_TRUE(checkMapping(mapping, numCts, ctSize));
 }
 
-TEST(ImplementShiftNetworkTest, TestSingleRotSplit) {
+TEST_P(ImplementShiftNetworkTest, TestSingleRotSplit) {
   int64_t numCts = 3;
   int64_t ctSize = 4;
   Mapping mapping(ctSize, numCts);
@@ -277,7 +283,7 @@ TEST(ImplementShiftNetworkTest, TestSingleRotSplit) {
   EXPECT_TRUE(checkMapping(mapping, numCts, ctSize));
 }
 
-TEST(ImplementShiftNetworkTest, TestRANDOM_61) {
+TEST_P(ImplementShiftNetworkTest, TestRANDOM_61) {
   int64_t numCts = 24;
   int64_t ctSize = 8;
   Mapping mapping(ctSize, numCts);
@@ -297,7 +303,7 @@ TEST(ImplementShiftNetworkTest, TestRANDOM_61) {
   EXPECT_TRUE(checkMapping(mapping, numCts, ctSize));
 }
 
-TEST(ImplementShiftNetworkTest, TestRANDOM_62) {
+TEST_P(ImplementShiftNetworkTest, TestRANDOM_62) {
   int64_t numCts = 24;
   int64_t ctSize = 8;
   Mapping mapping(ctSize, numCts);
@@ -496,7 +502,7 @@ TEST(ImplementShiftNetworkTest, TestRANDOM_62) {
   EXPECT_TRUE(checkMapping(mapping, numCts, ctSize));
 }
 
-TEST(ImplementShiftNetworkTest, TestRANDOM_64) {
+TEST_P(ImplementShiftNetworkTest, TestRANDOM_64) {
   int64_t numCts = 24;
   int64_t ctSize = 8;
   Mapping mapping(ctSize, numCts);
@@ -694,6 +700,9 @@ TEST(ImplementShiftNetworkTest, TestRANDOM_64) {
   mapping.add(CtSlot(5, 1), CtSlot(23, 7));
   EXPECT_TRUE(checkMapping(mapping, numCts, ctSize));
 }
+
+INSTANTIATE_TEST_SUITE_P(AllShiftKinds, ImplementShiftNetworkTest,
+                         ::testing::Values(ShiftKind::LEFT, ShiftKind::RIGHT));
 
 }  // namespace
 }  // namespace tensor_ext

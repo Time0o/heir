@@ -117,6 +117,7 @@ cc_library(
     hdrs = ["ShiftScheme.h"],
     deps = [
         "@heir//lib/Utils:MathUtils",
+        "@heir//lib/Utils/ADT:FrozenVector",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:Support",
     ],

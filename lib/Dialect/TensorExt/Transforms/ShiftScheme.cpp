@@ -13,33 +13,46 @@ namespace mlir {
 namespace heir {
 namespace tensor_ext {
 
-SmallVector<int64_t> defaultShiftOrder(int64_t n) {
+SmallVector<int64_t> ShiftStrategy::defaultShiftOrder(int64_t n, ShiftKind shiftKind) {
   SmallVector<int64_t> result;
+
   int64_t maxLog2 = APInt(64, n).getActiveBits();
   if (isPowerOfTwo(n)) maxLog2 -= 1;
-  for (int64_t i = 0; i < maxLog2; i++) result.push_back(1 << i);
-  return result;
-}
 
-// Convert an input->output index mapping to a canonical left-shift amount for
-// a given tensor size.
-// Example: 1 -> 13 with a 64-size tensor should produce a rotation of 52
-// Example: 13 -> 1 with a 64-size tensor should produce a rotation of 12
-inline int64_t normalizeShift(int64_t input, int64_t output,
-                              int64_t tensorSize) {
-  int64_t shift = (output - input) % tensorSize;
-  shift = -shift;  // Account for leftward rotations
-  if (shift < 0) {
-    shift += tensorSize;
+  for (int64_t i = 0; i < maxLog2; i++) {
+    int64_t shift;
+    switch (shiftKind) {
+    case ShiftKind::LEFT:
+      shift = 1 << i;
+      break;
+    case ShiftKind::RIGHT:
+      shift = -(1 << i);
+      break;
+    }
+    result.push_back(shift);
   }
-  return shift;
+
+  return result;
 }
 
 int64_t ShiftStrategy::getVirtualShift(const CtSlot& source,
                                        const CtSlot& target) const {
   int64_t sourceIndex = source.ct * ciphertextSize + source.slot;
   int64_t targetIndex = target.ct * ciphertextSize + target.slot;
-  return normalizeShift(sourceIndex, targetIndex, virtualCiphertextSize);
+
+  // Convert a source->target index mapping to a canonical left-shift (or
+  // right-shift) amount for a given ciphertext size.
+  // Example: 1 -> 13 with a 64-size ciphertext should produce a rotation of 52
+  // Example: 13 -> 1 with a 64-size ciphertext should produce a rotation of 12
+  int64_t shift = (targetIndex - sourceIndex) % virtualCiphertextSize;
+
+  if (shiftKind == ShiftKind::LEFT) {
+    shift = -shift;  // Account for leftward rotations
+  }
+  if (shift < 0) {
+    shift += virtualCiphertextSize;
+  }
+  return shift;
 }
 
 void ShiftStrategy::evaluate(const Mapping& mapping) {
@@ -73,8 +86,9 @@ void ShiftStrategy::evaluate(const Mapping& mapping) {
       int64_t currentVirtualSlot =
           currentPos.ct * ciphertextSize + currentPos.slot;
 
+      int64_t shift = key.shift;
       CtSlot nextPosition = currentPos;
-      if (rotationAmount & key.shift) {
+      if (std::abs(rotationAmount) & std::abs(shift)) {
         currentVirtualSlot =
             (currentVirtualSlot - rotationAmount + virtualCiphertextSize) %
             virtualCiphertextSize;

@@ -39,25 +39,26 @@ class VosVosErkinShiftNetworks {
   // The returned ArrayRef is owned by this VosVosErkinShiftNetworks instance.
   // The resulting set of rotation groups are is cached, and the cache is used
   // on further calls to avoid recomputing the shift network.
-  //
-  // The default shiftOrder is LSB to MSB, i.e. 1, 2, 4, 8, ...
   ShiftScheme findShiftScheme(const Mapping& mapping,
-                              ArrayRef<int64_t> shiftOrder = {});
+                              const ShiftStrategy &shiftStrategy);
+
+  // Like findShiftScheme but using default shift strategy.
+  ShiftScheme findShiftScheme(const Mapping& mapping,
+                              ShiftKind shiftKind = ShiftKind::DEFAULT);
 
   // Like findShiftScheme but randomly draw from a uniform distribution over all
-  // possible shift orders and use the one that results in the best network.
+  // possible shift strategies and use the one that results in the best network.
   ShiftScheme findBestShiftScheme(const Mapping& mapping,
-                                  std::size_t randomSeed,
+                                  ShiftKind shiftKind = ShiftKind::DEFAULT,
+                                  std::size_t randomSeed = 42,
                                   unsigned randomTries = 100);
 
  private:
-  ShiftStrategy evaluateShiftStrategy(const Mapping& mapping,
-                                      ArrayRef<int64_t> shiftOrder);
+  const ShiftStrategy &evaluateShiftStrategy(const Mapping& mapping,
+                                             ShiftStrategy shiftStrategy);
 
-  CacheKey makeCacheKey(const Mapping& mapping, ArrayRef<int64_t> shiftOrder);
-
-  DenseMap<CacheKey, ShiftStrategy> strategyCache;
-  DenseMap<CacheKey, ShiftScheme> schemeCache;
+  DenseSet<ShiftStrategy> strategyCache;
+  DenseMap<ShiftStrategy, ShiftScheme> schemeCache;
 };
 
 }  // namespace tensor_ext
